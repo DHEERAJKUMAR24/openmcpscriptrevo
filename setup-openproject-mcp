@@ -62,16 +62,21 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 # ============================================================
 Write-Host ""
 Write-Host "[ 2/3 ] Checking Python..." -ForegroundColor Yellow
-if (Get-Command python -ErrorAction SilentlyContinue) {
-    $pyVer = (python --version 2>&1)
+$pyVer = (python --version 2>&1)
+$pyWorking = ($LASTEXITCODE -eq 0) -and ($pyVer -match "Python 3\.")
+if ($pyWorking) {
     Write-Host "  [SKIP] Python already installed: $pyVer" -ForegroundColor Green
 } else {
+    if ($pyVer) {
+        Write-Host "  [INFO] Python command found but broken ($pyVer). Installing fresh copy..." -ForegroundColor Yellow
+    }
     Assert-Winget
-    Write-Host "  [INFO] Python not found. Installing Python 3.11 via winget..." -ForegroundColor Yellow
+    Write-Host "  [INFO] Installing Python 3.11 via winget..." -ForegroundColor Yellow
     winget install --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements --silent
     Refresh-Path
-    if (Get-Command python -ErrorAction SilentlyContinue) {
-        Write-Host "  [ OK ] Python installed successfully." -ForegroundColor Green
+    $pyVer2 = (python --version 2>&1)
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [ OK ] Python installed successfully: $pyVer2" -ForegroundColor Green
     } else {
         Write-Host "  [ERROR] Python installation failed. Please install Python 3.11 manually from https://python.org" -ForegroundColor Red
         exit 1
