@@ -1,0 +1,335 @@
+<#
+.SYNOPSIS
+    One-shot local setup for the OpenProject MCP Server.
+    Run via:
+        Set-ExecutionPolicy Bypass -Scope Process -Force; irm <RAW_GITHUB_URL> | iex
+#>
+
+$ErrorActionPreference = "Stop"
+
+# ============================================================
+# STEP 0 — Banner
+# ============================================================
+Clear-Host
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  OpenProject MCP Server — Local Setup" -ForegroundColor Cyan
+Write-Host "  Running as Windows user: $env:USERNAME" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# ============================================================
+# Helper: refresh PATH in current session after winget install
+# ============================================================
+function Refresh-Path {
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path","User")
+}
+
+# ============================================================
+# Helper: check winget is available
+# ============================================================
+function Assert-Winget {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Host "  [ERROR] winget (Windows Package Manager) is not available on this machine." -ForegroundColor Red
+        Write-Host "  Please install 'App Installer' from the Microsoft Store and re-run this script." -ForegroundColor Yellow
+        exit 1
+    }
+}
+
+# ============================================================
+# STEP 1 — Git
+# ============================================================
+Write-Host "[ 1/3 ] Checking Git..." -ForegroundColor Yellow
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $gitVer = (git --version)
+    Write-Host "  [SKIP] Git already installed: $gitVer" -ForegroundColor Green
+} else {
+    Assert-Winget
+    Write-Host "  [INFO] Git not found. Installing via winget..." -ForegroundColor Yellow
+    winget install --id Git.Git --accept-package-agreements --accept-source-agreements --silent
+    Refresh-Path
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Write-Host "  [ OK ] Git installed successfully." -ForegroundColor Green
+    } else {
+        Write-Host "  [ERROR] Git installation failed. Please install Git manually from https://git-scm.com" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# ============================================================
+# STEP 2 — Python 3.11
+# ============================================================
+Write-Host ""
+Write-Host "[ 2/3 ] Checking Python..." -ForegroundColor Yellow
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    $pyVer = (python --version 2>&1)
+    Write-Host "  [SKIP] Python already installed: $pyVer" -ForegroundColor Green
+} else {
+    Assert-Winget
+    Write-Host "  [INFO] Python not found. Installing Python 3.11 via winget..." -ForegroundColor Yellow
+    winget install --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements --silent
+    Refresh-Path
+    if (Get-Command python -ErrorAction SilentlyContinue) {
+        Write-Host "  [ OK ] Python installed successfully." -ForegroundColor Green
+    } else {
+        Write-Host "  [ERROR] Python installation failed. Please install Python 3.11 manually from https://python.org" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# ============================================================
+# STEP 3 — uv (fast Python package manager)
+# ============================================================
+Write-Host ""
+Write-Host "[ 3/3 ] Checking uv (Python package manager)..." -ForegroundColor Yellow
+if (Get-Command uv -ErrorAction SilentlyContinue) {
+    $uvVer = (uv --version)
+    Write-Host "  [SKIP] uv already installed: $uvVer" -ForegroundColor Green
+} else {
+    Write-Host "  [INFO] uv not found. Installing via official installer..." -ForegroundColor Yellow
+    try {
+        powershell -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+        Refresh-Path
+        if (Get-Command uv -ErrorAction SilentlyContinue) {
+            Write-Host "  [ OK ] uv installed successfully." -ForegroundColor Green
+        } else {
+            # uv installs to %USERPROFILE%\.cargo\bin or %USERPROFILE%\.local\bin — add both
+            $env:Path = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;" + $env:Path
+            if (Get-Command uv -ErrorAction SilentlyContinue) {
+                Write-Host "  [ OK ] uv installed successfully." -ForegroundColor Green
+            } else {
+                Write-Host "  [ERROR] uv installation failed. Please install manually: https://docs.astral.sh/uv/getting-started/installation/" -ForegroundColor Red
+                exit 1
+            }
+        }
+    } catch {
+        Write-Host "  [ERROR] Failed to install uv: $_" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# ============================================================
+# STEP 4 — Collect user info
+# ============================================================
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Identity & Credentials Setup" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+
+$DefaultName = $env:USERNAME
+$Username = Read-Host "  Your name [default: $DefaultName]"
+if ([string]::IsNullOrWhiteSpace($Username)) { $Username = $DefaultName }
+
+Write-Host ""
+$DefaultUrl = "http://10.10.12.23"
+$OpUrl = Read-Host "  OpenProject URL [default: $DefaultUrl]"
+if ([string]::IsNullOrWhiteSpace($OpUrl)) { $OpUrl = $DefaultUrl }
+$OpUrl = $OpUrl.TrimEnd("/")
+
+Write-Host ""
+Write-Host "  How to get your API key:" -ForegroundColor DarkGray
+Write-Host "    1. Open $OpUrl in your browser" -ForegroundColor DarkGray
+Write-Host "    2. Go to Avatar (top-right) > My account > Access tokens" -ForegroundColor DarkGray
+Write-Host "    3. Generate a new API token and paste it below" -ForegroundColor DarkGray
+Write-Host ""
+$OpApiKey = Read-Host "  Your OpenProject API Key"
+if ([string]::IsNullOrWhiteSpace($OpApiKey)) {
+    Write-Host "  [ERROR] API Key cannot be empty." -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# STEP 5 — Generate unique MCP secret
+# ============================================================
+$UniqueHash = (New-Guid).ToString().Replace("-","").Substring(0,12)
+$McpSecret = "mcp-$Username-$UniqueHash"
+Write-Host ""
+Write-Host "  Generated MCP Secret: $McpSecret" -ForegroundColor Green
+Write-Host "  (This is saved to credentials.txt in D:\openproject-mcp)" -ForegroundColor DarkGray
+
+# ============================================================
+# STEP 6 — Create D:\openproject-mcp
+# ============================================================
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Directory Setup" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+
+$InstallDir = "D:\openproject-mcp"
+if (Test-Path $InstallDir) {
+    Write-Host "  [SKIP] $InstallDir already exists." -ForegroundColor Green
+} else {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    Write-Host "  [ OK ] Created $InstallDir" -ForegroundColor Green
+}
+
+# ============================================================
+# STEP 7 — Clone or update repo
+# ============================================================
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Repository Setup" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+
+$RepoDir = "$InstallDir\openproject-mcp-server"
+if (Test-Path "$RepoDir\.git") {
+    Write-Host "  [SKIP] Repository already exists. Pulling latest changes..." -ForegroundColor Green
+    Push-Location $RepoDir
+    git pull
+    Pop-Location
+} else {
+    Write-Host "  [INFO] Cloning openproject-mcp-server..." -ForegroundColor Yellow
+    git clone https://github.com/andyeverything/openproject-mcp-server.git $RepoDir
+    Write-Host "  [ OK ] Repository cloned to $RepoDir" -ForegroundColor Green
+}
+
+# ============================================================
+# STEP 8 — Install Python dependencies via uv
+# ============================================================
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Python Environment Setup (uv sync)" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+
+Push-Location $RepoDir
+Write-Host "  [INFO] Running uv sync (creates .venv and installs all dependencies)..." -ForegroundColor Yellow
+uv sync
+Write-Host "  [ OK ] Python environment ready." -ForegroundColor Green
+Pop-Location
+
+# ============================================================
+# STEP 9 — Write .env file
+# ============================================================
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Environment Configuration" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+
+$EnvPath = "$RepoDir\.env"
+$EnvContent = @"
+OPENPROJECT_URL=$OpUrl
+OPENPROJECT_API_KEY=$OpApiKey
+"@
+Set-Content -Path $EnvPath -Value $EnvContent -Force -Encoding UTF8
+Write-Host "  [ OK ] .env written to $EnvPath" -ForegroundColor Green
+
+# ============================================================
+# STEP 10 — Test API connection and list projects
+# ============================================================
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Testing OpenProject API Connection" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Connecting to $OpUrl/api/v3/projects ..." -ForegroundColor Yellow
+
+try {
+    $AuthBytes = [System.Text.Encoding]::ASCII.GetBytes("apikey:$OpApiKey")
+    $AuthB64   = [System.Convert]::ToBase64String($AuthBytes)
+    $Headers   = @{ "Authorization" = "Basic $AuthB64" }
+
+    $Response = Invoke-RestMethod `
+        -Uri "$OpUrl/api/v3/projects" `
+        -Headers $Headers `
+        -Method Get `
+        -ErrorAction Stop
+
+    $Projects = $Response._embedded.elements
+    $Count    = $Projects.Count
+
+    Write-Host ""
+    Write-Host "  SUCCESS! Authenticated as: $Username" -ForegroundColor Green
+    Write-Host "  Found $Count project(s):" -ForegroundColor Green
+    Write-Host ""
+    $i = 1
+    foreach ($proj in $Projects) {
+        Write-Host ("  {0,3}. {1}" -f $i, $proj.name) -ForegroundColor White
+        $i++
+    }
+} catch {
+    Write-Host ""
+    Write-Host "  [ERROR] Could not connect to OpenProject." -ForegroundColor Red
+    Write-Host "  Details: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Checklist:" -ForegroundColor Yellow
+    Write-Host "    - Is OpenProject running at $OpUrl ?" -ForegroundColor Yellow
+    Write-Host "    - Is your API key correct? (Avatar > My account > Access tokens)" -ForegroundColor Yellow
+    Write-Host "    - Are you on the right network / VPN?" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Re-run this script after fixing the issue." -ForegroundColor Yellow
+    exit 1
+}
+
+# ============================================================
+# STEP 11 — Print Claude Desktop config
+# ============================================================
+$ClaudeConfigPath = "$env:APPDATA\Claude\claude_desktop_config.json"
+$RepoDirEscaped   = $RepoDir.Replace("\","\\")
+$EntryPoint       = "$RepoDirEscaped\\openproject-mcp-fastmcp.py"
+
+$ClaudeConfigJson = @"
+{
+  "mcpServers": {
+    "openproject-$Username-local": {
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "$EntryPoint"
+      ],
+      "cwd": "$RepoDirEscaped"
+    }
+  }
+}
+"@
+
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Magenta
+Write-Host "  Claude Desktop MCP Config" -ForegroundColor Magenta
+Write-Host "============================================================" -ForegroundColor Magenta
+Write-Host ""
+Write-Host "  Add (or merge) the following into:" -ForegroundColor Yellow
+Write-Host "  $ClaudeConfigPath" -ForegroundColor White
+Write-Host ""
+Write-Host $ClaudeConfigJson -ForegroundColor Cyan
+
+# ============================================================
+# STEP 12 — Save credentials summary
+# ============================================================
+$CredFile = "$InstallDir\credentials.txt"
+$CredContent = @"
+OpenProject MCP — Local Setup Summary
+======================================
+Setup Date   : $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+Windows User : $env:USERNAME
+Display Name : $Username
+Server URL   : $OpUrl
+MCP Secret   : $McpSecret
+Repo Location: $RepoDir
+
+To start the MCP server manually:
+  cd $RepoDir
+  uv run python openproject-mcp-fastmcp.py
+
+Claude Desktop config file location:
+  $ClaudeConfigPath
+"@
+Set-Content -Path $CredFile -Value $CredContent -Force -Encoding UTF8
+
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Green
+Write-Host "  SETUP COMPLETE!" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Credentials summary saved to: $CredFile" -ForegroundColor White
+Write-Host ""
+Write-Host "  To start the MCP server:" -ForegroundColor Yellow
+Write-Host "    cd $RepoDir" -ForegroundColor White
+Write-Host "    uv run python openproject-mcp-fastmcp.py" -ForegroundColor White
+Write-Host ""
+Write-Host "  To share this setup script with teammates:" -ForegroundColor Yellow
+Write-Host "    1. Push setup-openproject-mcp.ps1 to your GitHub repo" -ForegroundColor White
+Write-Host "    2. Get the Raw URL and share this one-liner:" -ForegroundColor White
+Write-Host "       Set-ExecutionPolicy Bypass -Scope Process -Force; irm <RAW_URL> | iex" -ForegroundColor Cyan
+Write-Host ""
