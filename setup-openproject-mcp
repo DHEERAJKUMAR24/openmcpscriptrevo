@@ -228,25 +228,27 @@ Write-Host "============================================================" -Foreg
 Push-Location $RepoDir
 Write-Host "  [INFO] Running uv sync..." -ForegroundColor Yellow
 
-# First attempt
+# First attempt (normal, uses cache)
 & $script:UvExe sync
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  [WARN] uv sync failed. Clearing uv cache and retrying..." -ForegroundColor Yellow
 
-    # Clear stuck pywin32 / archive-v0 cache (common on Windows permission errors)
-    $uvCacheArchive = "$env:LOCALAPPDATA\uv\cache\archive-v0"
-    $uvCacheTmp     = "$env:LOCALAPPDATA\uv\cache"
-    Get-ChildItem $uvCacheTmp -Filter ".tmp*" -ErrorAction SilentlyContinue |
+    # Clear stuck archive-v0 and temp files (Windows permission / AV conflict)
+    Get-ChildItem "$env:LOCALAPPDATA\uv\cache" -Filter ".tmp*" -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    if (Test-Path $uvCacheArchive) {
-        Remove-Item $uvCacheArchive -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "  [INFO] Cache cleared." -ForegroundColor DarkGray
-    }
+    Remove-Item "$env:LOCALAPPDATA\uv\cache\archive-v0" -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "  [INFO] Cache cleared." -ForegroundColor DarkGray
 
-    # Retry
+    # Second attempt with cache cleared
     & $script:UvExe sync
     if ($LASTEXITCODE -ne 0) {
-        throw "uv sync failed after cache clear (exit code: $LASTEXITCODE)"
+        Write-Host "  [WARN] Still failing. Retrying with --no-cache (bypasses AppData restrictions)..." -ForegroundColor Yellow
+
+        # Third attempt: skip cache entirely (works when AV/policy blocks AppData writes)
+        & $script:UvExe sync --no-cache
+        if ($LASTEXITCODE -ne 0) {
+            throw "uv sync failed (exit code: $LASTEXITCODE). Try running PowerShell as Administrator and re-run this script."
+        }
     }
 }
 
