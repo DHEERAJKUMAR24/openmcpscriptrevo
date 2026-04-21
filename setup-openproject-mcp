@@ -227,7 +227,29 @@ Write-Host "============================================================" -Foreg
 
 Push-Location $RepoDir
 Write-Host "  [INFO] Running uv sync..." -ForegroundColor Yellow
-Invoke-Native -FilePath $script:UvExe -Arguments @('sync') -FailureMessage 'uv sync failed'
+
+# First attempt
+& $script:UvExe sync
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [WARN] uv sync failed. Clearing uv cache and retrying..." -ForegroundColor Yellow
+
+    # Clear stuck pywin32 / archive-v0 cache (common on Windows permission errors)
+    $uvCacheArchive = "$env:LOCALAPPDATA\uv\cache\archive-v0"
+    $uvCacheTmp     = "$env:LOCALAPPDATA\uv\cache"
+    Get-ChildItem $uvCacheTmp -Filter ".tmp*" -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $uvCacheArchive) {
+        Remove-Item $uvCacheArchive -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  [INFO] Cache cleared." -ForegroundColor DarkGray
+    }
+
+    # Retry
+    & $script:UvExe sync
+    if ($LASTEXITCODE -ne 0) {
+        throw "uv sync failed after cache clear (exit code: $LASTEXITCODE)"
+    }
+}
+
 Write-Host "  [ OK ] Python environment ready." -ForegroundColor Green
 Pop-Location
 
