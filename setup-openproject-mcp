@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     One-shot local setup for the OpenProject MCP Server.
@@ -8,12 +9,12 @@
 $ErrorActionPreference = "Stop"
 
 # ============================================================
-# STEP 0 — Banner
+# STEP 0 - Banner
 # ============================================================
 Clear-Host
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  OpenProject MCP Server — Local Setup" -ForegroundColor Cyan
+Write-Host "  OpenProject MCP Server - Local Setup" -ForegroundColor Cyan
 Write-Host "  Running as Windows user: $env:USERNAME" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
@@ -22,8 +23,47 @@ Write-Host ""
 # Helper: refresh PATH in current session after winget install
 # ============================================================
 function Refresh-Path {
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("Path","User")
+    $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath    = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path    = $machinePath + ';' + $userPath
+}
+
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [string[]]$Arguments = @(),
+
+        [string]$FailureMessage = "Command failed: $FilePath"
+    )
+
+    & $FilePath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$FailureMessage (exit code: $LASTEXITCODE)"
+    }
+}
+
+function Resolve-UvExe {
+    $knownUvPaths = @(
+        "$env:USERPROFILE\.local\bin\uv.exe",
+        "$env:USERPROFILE\.cargo\bin\uv.exe",
+        "$env:LOCALAPPDATA\uv\bin\uv.exe",
+        "$env:APPDATA\uv\bin\uv.exe"
+    )
+
+    foreach ($path in $knownUvPaths) {
+        if (Test-Path $path) {
+            return $path
+        }
+    }
+
+    $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
+    if ($uvCmd) {
+        return $uvCmd.Source
+    }
+
+    return $null
 }
 
 # ============================================================
@@ -31,14 +71,14 @@ function Refresh-Path {
 # ============================================================
 function Assert-Winget {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Host "  [ERROR] winget (Windows Package Manager) is not available on this machine." -ForegroundColor Red
-        Write-Host "  Please install 'App Installer' from the Microsoft Store and re-run this script." -ForegroundColor Yellow
+        Write-Host "  [ERROR] winget is not available on this machine." -ForegroundColor Red
+        Write-Host "  Please install 'App Installer' from the Microsoft Store and re-run." -ForegroundColor Yellow
         exit 1
     }
 }
 
 # ============================================================
-# STEP 1 — Git
+# STEP 1 - Git
 # ============================================================
 Write-Host "[ 1/3 ] Checking Git..." -ForegroundColor Yellow
 if (Get-Command git -ErrorAction SilentlyContinue) {
@@ -47,83 +87,65 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 } else {
     Assert-Winget
     Write-Host "  [INFO] Git not found. Installing via winget..." -ForegroundColor Yellow
-    winget install --id Git.Git --accept-package-agreements --accept-source-agreements --silent
+    Invoke-Native -FilePath 'winget' -Arguments @(
+        'install', '--id', 'Git.Git', '--accept-package-agreements', '--accept-source-agreements', '--silent'
+    ) -FailureMessage 'Git installation failed'
     Refresh-Path
     if (Get-Command git -ErrorAction SilentlyContinue) {
         Write-Host "  [ OK ] Git installed successfully." -ForegroundColor Green
     } else {
-        Write-Host "  [ERROR] Git installation failed. Please install Git manually from https://git-scm.com" -ForegroundColor Red
+        Write-Host "  [ERROR] Git installation failed. Install manually from https://git-scm.com" -ForegroundColor Red
         exit 1
     }
 }
 
 # ============================================================
-# STEP 2 — Python 3.11
+# STEP 2 - uv (manages Python internally - no system Python needed)
 # ============================================================
 Write-Host ""
-Write-Host "[ 2/3 ] Checking Python..." -ForegroundColor Yellow
-$pyVer = (python --version 2>&1)
-$pyWorking = ($LASTEXITCODE -eq 0) -and ($pyVer -match "Python 3\.")
-if ($pyWorking) {
-    Write-Host "  [SKIP] Python already installed: $pyVer" -ForegroundColor Green
-} else {
-    if ($pyVer) {
-        Write-Host "  [INFO] Python command found but broken ($pyVer). Installing fresh copy..." -ForegroundColor Yellow
-    }
-    Assert-Winget
-    Write-Host "  [INFO] Installing Python 3.11 via winget..." -ForegroundColor Yellow
-    winget install --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements --silent
-    Refresh-Path
-    $pyVer2 = (python --version 2>&1)
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  [ OK ] Python installed successfully: $pyVer2" -ForegroundColor Green
-    } else {
-        Write-Host "  [ERROR] Python installation failed. Please install Python 3.11 manually from https://python.org" -ForegroundColor Red
-        exit 1
-    }
-}
-
-# ============================================================
-# STEP 3 — uv (fast Python package manager)
-# ============================================================
-Write-Host ""
-Write-Host "[ 3/3 ] Checking uv (Python package manager)..." -ForegroundColor Yellow
+Write-Host "[ 2/3 ] Checking uv (Python package manager)..." -ForegroundColor Yellow
 if (Get-Command uv -ErrorAction SilentlyContinue) {
     $uvVer = (uv --version)
     Write-Host "  [SKIP] uv already installed: $uvVer" -ForegroundColor Green
 } else {
-    Write-Host "  [INFO] uv not found. Installing via official installer..." -ForegroundColor Yellow
-    try {
-        powershell -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
-        Refresh-Path
-        if (Get-Command uv -ErrorAction SilentlyContinue) {
-            Write-Host "  [ OK ] uv installed successfully." -ForegroundColor Green
-        } else {
-            # uv installs to %USERPROFILE%\.cargo\bin or %USERPROFILE%\.local\bin — add both
-            $env:Path = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;" + $env:Path
-            if (Get-Command uv -ErrorAction SilentlyContinue) {
-                Write-Host "  [ OK ] uv installed successfully." -ForegroundColor Green
-            } else {
-                Write-Host "  [ERROR] uv installation failed. Please install manually: https://docs.astral.sh/uv/getting-started/installation/" -ForegroundColor Red
-                exit 1
-            }
-        }
-    } catch {
-        Write-Host "  [ERROR] Failed to install uv: $_" -ForegroundColor Red
+    Assert-Winget
+    Write-Host "  [INFO] uv not found. Installing via winget..." -ForegroundColor Yellow
+    Invoke-Native -FilePath 'winget' -Arguments @(
+        'install', '--id', 'astral-sh.uv', '--accept-package-agreements', '--accept-source-agreements', '--silent'
+    ) -FailureMessage 'uv installation failed'
+    Refresh-Path
+    $env:Path = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;" + $env:Path
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        Write-Host "  [ OK ] uv installed successfully." -ForegroundColor Green
+    } else {
+        Write-Host "  [ERROR] uv installation failed. Install manually from https://docs.astral.sh/uv/" -ForegroundColor Red
         exit 1
     }
 }
 
 # ============================================================
-# STEP 4 — Collect user info
+# STEP 3 - Ensure Python 3.11 is available via uv
+# ============================================================
+Write-Host ""
+Write-Host "[ 3/3 ] Checking Python (via uv)..." -ForegroundColor Yellow
+$script:UvExe = Resolve-UvExe
+if (-not $script:UvExe) {
+    Write-Host "  [ERROR] uv is still not available after installation." -ForegroundColor Red
+    exit 1
+}
+Invoke-Native -FilePath $script:UvExe -Arguments @('python', 'install', '3.11') -FailureMessage 'Python 3.11 installation via uv failed'
+Write-Host "  [ OK ] Python 3.11 ready." -ForegroundColor Green
+
+# ============================================================
+# STEP 4 - Collect user info
 # ============================================================
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  Identity & Credentials Setup" -ForegroundColor Cyan
+Write-Host "  Identity and Credentials Setup" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
-$DefaultName = $env:USERNAME
+$DefaultName = "$env:USERNAME Ai Mcp"
 $Username = Read-Host "  Your name [default: $DefaultName]"
 if ([string]::IsNullOrWhiteSpace($Username)) { $Username = $DefaultName }
 
@@ -131,13 +153,18 @@ Write-Host ""
 $DefaultUrl = "http://10.10.12.23"
 $OpUrl = Read-Host "  OpenProject URL [default: $DefaultUrl]"
 if ([string]::IsNullOrWhiteSpace($OpUrl)) { $OpUrl = $DefaultUrl }
-$OpUrl = $OpUrl.TrimEnd("/")
+$OpUrl = $OpUrl.TrimEnd('/')
 
 Write-Host ""
+Write-Host "  Opening your API token page in the browser..." -ForegroundColor Yellow
+Start-Process "$OpUrl/my/access_token"
+$DisplayAccessTokenUrl = "$OpUrl/my/access_token"
+Write-Host ""
 Write-Host "  How to get your API key:" -ForegroundColor DarkGray
-Write-Host "    1. Open $OpUrl in your browser" -ForegroundColor DarkGray
-Write-Host "    2. Go to Avatar (top-right) > My account > Access tokens" -ForegroundColor DarkGray
-Write-Host "    3. Generate a new API token and paste it below" -ForegroundColor DarkGray
+Write-Host "    1. The page $DisplayAccessTokenUrl just opened in your browser" -ForegroundColor DarkGray
+Write-Host "    2. Click the [ + API token ] button" -ForegroundColor DarkGray
+Write-Host "    3. Give it any name, then click Save" -ForegroundColor DarkGray
+Write-Host "    4. Copy the token shown and paste it below" -ForegroundColor DarkGray
 Write-Host ""
 $OpApiKey = Read-Host "  Your OpenProject API Key"
 if ([string]::IsNullOrWhiteSpace($OpApiKey)) {
@@ -146,23 +173,23 @@ if ([string]::IsNullOrWhiteSpace($OpApiKey)) {
 }
 
 # ============================================================
-# STEP 5 — Generate unique MCP secret
+# STEP 5 - Generate unique MCP secret
 # ============================================================
-$UniqueHash = (New-Guid).ToString().Replace("-","").Substring(0,12)
-$McpSecret = "mcp-$Username-$UniqueHash"
+$UniqueHash = (New-Guid).ToString().Replace('-', '').Substring(0, 12)
+$McpSecret  = "mcp-$Username-$UniqueHash"
 Write-Host ""
 Write-Host "  Generated MCP Secret: $McpSecret" -ForegroundColor Green
-Write-Host "  (This is saved to credentials.txt in D:\openproject-mcp)" -ForegroundColor DarkGray
+Write-Host "  (Saved to D:\openproject-mcp\credentials.txt)" -ForegroundColor DarkGray
 
 # ============================================================
-# STEP 6 — Create D:\openproject-mcp
+# STEP 6 - Create D:\openproject-mcp
 # ============================================================
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  Directory Setup" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
-$InstallDir = "D:\openproject-mcp"
+$InstallDir = 'D:\openproject-mcp'
 if (Test-Path $InstallDir) {
     Write-Host "  [SKIP] $InstallDir already exists." -ForegroundColor Green
 } else {
@@ -171,7 +198,7 @@ if (Test-Path $InstallDir) {
 }
 
 # ============================================================
-# STEP 7 — Clone or update repo
+# STEP 7 - Clone or update repo
 # ============================================================
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -182,16 +209,16 @@ $RepoDir = "$InstallDir\openproject-mcp-server"
 if (Test-Path "$RepoDir\.git") {
     Write-Host "  [SKIP] Repository already exists. Pulling latest changes..." -ForegroundColor Green
     Push-Location $RepoDir
-    git pull
+    Invoke-Native -FilePath 'git' -Arguments @('pull') -FailureMessage 'git pull failed'
     Pop-Location
 } else {
     Write-Host "  [INFO] Cloning openproject-mcp-server..." -ForegroundColor Yellow
-    git clone https://github.com/andyeverything/openproject-mcp-server.git $RepoDir
+    Invoke-Native -FilePath 'git' -Arguments @('clone', 'https://github.com/andyeverything/openproject-mcp-server.git', $RepoDir) -FailureMessage 'git clone failed'
     Write-Host "  [ OK ] Repository cloned to $RepoDir" -ForegroundColor Green
 }
 
 # ============================================================
-# STEP 8 — Install Python dependencies via uv
+# STEP 8 - Install Python dependencies via uv
 # ============================================================
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -199,29 +226,26 @@ Write-Host "  Python Environment Setup (uv sync)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
 Push-Location $RepoDir
-Write-Host "  [INFO] Running uv sync (creates .venv and installs all dependencies)..." -ForegroundColor Yellow
-uv sync
+Write-Host "  [INFO] Running uv sync..." -ForegroundColor Yellow
+Invoke-Native -FilePath $script:UvExe -Arguments @('sync') -FailureMessage 'uv sync failed'
 Write-Host "  [ OK ] Python environment ready." -ForegroundColor Green
 Pop-Location
 
 # ============================================================
-# STEP 9 — Write .env file
+# STEP 9 - Write .env file
 # ============================================================
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  Environment Configuration" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
-$EnvPath = "$RepoDir\.env"
-$EnvContent = @"
-OPENPROJECT_URL=$OpUrl
-OPENPROJECT_API_KEY=$OpApiKey
-"@
-Set-Content -Path $EnvPath -Value $EnvContent -Force -Encoding UTF8
+$EnvPath    = "$RepoDir\.env"
+$EnvContent = "OPENPROJECT_URL=$OpUrl`nOPENPROJECT_API_KEY=$OpApiKey"
+[System.IO.File]::WriteAllText($EnvPath, $EnvContent, [System.Text.UTF8Encoding]::new($false))
 Write-Host "  [ OK ] .env written to $EnvPath" -ForegroundColor Green
 
 # ============================================================
-# STEP 10 — Test API connection and list projects
+# STEP 10 - Test API connection and list projects
 # ============================================================
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -232,7 +256,7 @@ Write-Host "  Connecting to $OpUrl/api/v3/projects ..." -ForegroundColor Yellow
 try {
     $AuthBytes = [System.Text.Encoding]::ASCII.GetBytes("apikey:$OpApiKey")
     $AuthB64   = [System.Convert]::ToBase64String($AuthBytes)
-    $Headers   = @{ "Authorization" = "Basic $AuthB64" }
+    $Headers   = @{ Authorization = "Basic $AuthB64" }
 
     $Response = Invoke-RestMethod `
         -Uri "$OpUrl/api/v3/projects" `
@@ -267,46 +291,223 @@ try {
 }
 
 # ============================================================
-# STEP 11 — Print Claude Desktop config
+# STEP 11 - Auto-register MCP in all detected AI tools
+# ============================================================
+$script:McpServerName = "openproject-$($Username.Replace(' ','-').ToLower())-local"
+$script:McpEntryPoint = "$RepoDir\openproject-mcp-fastmcp.py"
+$script:McpRepoDir    = $RepoDir
+$script:McpOpUrl      = $OpUrl
+$script:McpApiKey     = $OpApiKey
+
+# Resolve full path to uv.exe - AI tools launch with minimal PATH so bare 'uv' fails
+$script:UvExe = Resolve-UvExe
+if ($script:UvExe) {
+    Write-Host "  [INFO] uv resolved to: $($script:UvExe)" -ForegroundColor DarkGray
+} else {
+    Write-Host "  [ERROR] Could not resolve uv.exe for MCP registration." -ForegroundColor Red
+    exit 1
+}
+
+# -------------------------------------------------------
+# Core server object - used by every tool
+# No cwd: --directory tells uv where the project is.
+# env block means credentials travel with the config.
+# -------------------------------------------------------
+function New-McpServerObj {
+    param([string]$Format)   # 'claude' | 'vscode-mcp' | 'vscode-settings' | 'zed'
+    $EnvObj = [ordered]@{
+        OPENPROJECT_URL     = $script:McpOpUrl
+        OPENPROJECT_API_KEY = $script:McpApiKey
+    }
+    $BaseArgs = @('run', '--directory', $script:McpRepoDir, 'python', $script:McpEntryPoint)
+    if ($Format -eq 'vscode-mcp' -or $Format -eq 'vscode-settings') {
+        return [ordered]@{ type = 'stdio'; command = $script:UvExe; args = $BaseArgs; env = $EnvObj }
+    } else {
+        return [ordered]@{ command = $script:UvExe; args = $BaseArgs; env = $EnvObj }
+    }
+}
+
+# -------------------------------------------------------
+# Merge helper - reads JSON, inserts server, writes back
+# -------------------------------------------------------
+function Register-McpTool {
+    param(
+        [string]$ToolName,
+        [string]$ConfigPath,
+        [string]$Format   # 'claude' | 'vscode-mcp' | 'vscode-settings' | 'zed'
+    )
+
+    $ConfigDir = Split-Path $ConfigPath
+    if (-not (Test-Path $ConfigDir)) {
+        Write-Host "  [SKIP] $ToolName - not installed." -ForegroundColor DarkGray
+        return
+    }
+
+    $ServerObj = New-McpServerObj -Format $Format
+
+    if (Test-Path $ConfigPath) {
+        try   { $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json -ErrorAction Stop }
+        catch { $Config = [PSCustomObject]@{} }
+    } else {
+        $Config = [PSCustomObject]@{}
+    }
+
+    switch ($Format) {
+        'vscode-mcp' {
+            # VS Code dedicated mcp.json  ->  { "servers": { ... }, "inputs": [] }
+            if (-not $Config.PSObject.Properties['servers']) {
+                $Config | Add-Member -NotePropertyName 'servers' -NotePropertyValue ([PSCustomObject]@{})
+            }
+            if (-not $Config.PSObject.Properties['inputs']) {
+                $Config | Add-Member -NotePropertyName 'inputs' -NotePropertyValue @()
+            }
+            $Config.servers | Add-Member -NotePropertyName $script:McpServerName -NotePropertyValue $ServerObj -Force
+        }
+        'vscode-settings' {
+            # Older VS Code settings.json  ->  { "mcp": { "servers": { ... } } }
+            if (-not $Config.PSObject.Properties['mcp']) {
+                $Config | Add-Member -NotePropertyName 'mcp' -NotePropertyValue ([PSCustomObject]@{ servers = [PSCustomObject]@{} })
+            }
+            if (-not $Config.mcp.PSObject.Properties['servers']) {
+                $Config.mcp | Add-Member -NotePropertyName 'servers' -NotePropertyValue ([PSCustomObject]@{})
+            }
+            $Config.mcp.servers | Add-Member -NotePropertyName $script:McpServerName -NotePropertyValue $ServerObj -Force
+        }
+        'zed' {
+            # Zed settings.json -> { "context_servers": { ... } }
+            if (-not $Config.PSObject.Properties['context_servers']) {
+                $Config | Add-Member -NotePropertyName 'context_servers' -NotePropertyValue ([PSCustomObject]@{})
+            }
+            $Config.context_servers | Add-Member -NotePropertyName $script:McpServerName -NotePropertyValue $ServerObj -Force
+        }
+        default {
+            # Claude Desktop, Cursor, Windsurf, etc.  ->  { "mcpServers": { ... } }
+            if (-not $Config.PSObject.Properties['mcpServers']) {
+                $Config | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([PSCustomObject]@{})
+            }
+            $Config.mcpServers | Add-Member -NotePropertyName $script:McpServerName -NotePropertyValue $ServerObj -Force
+        }
+    }
+
+    $Json = $Config | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText($ConfigPath, $Json, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "  [ OK ] $ToolName" -ForegroundColor Green
+    Write-Host "         $ConfigPath" -ForegroundColor DarkGray
+}
+
+# -------------------------------------------------------
+# Claude Code CLI - official CLI, no JSON editing needed
+# -------------------------------------------------------
+function Register-ClaudeCodeCli {
+    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+        Write-Host "  [SKIP] Claude Code CLI - not found in PATH." -ForegroundColor DarkGray
+        return
+    }
+    # Remove stale entry first (ignore errors if it doesn't exist)
+    & claude mcp remove $script:McpServerName --scope user 2>$null | Out-Null
+    & claude mcp add $script:McpServerName `
+        --scope user `
+        -e "OPENPROJECT_URL=$($script:McpOpUrl)" `
+        -e "OPENPROJECT_API_KEY=$($script:McpApiKey)" `
+        -- "$($script:UvExe)" run --directory "$($script:McpRepoDir)" python "$($script:McpEntryPoint)" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "claude mcp add failed (exit code: $LASTEXITCODE)"
+    }
+    Write-Host "  [ OK ] Claude Code CLI (claude mcp add --scope user)" -ForegroundColor Green
+}
+
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Magenta
+Write-Host "  Registering MCP in detected AI tools" -ForegroundColor Magenta
+Write-Host "============================================================" -ForegroundColor Magenta
+Write-Host ""
+
+# --- Anthropic ---
+Register-McpTool -ToolName 'Claude Desktop' `
+    -ConfigPath "$env:APPDATA\Claude\claude_desktop_config.json" `
+    -Format 'claude'
+
+# Claude Code CLI - uses official CLI command, not direct JSON edit
+Register-ClaudeCodeCli
+
+# --- Microsoft / GitHub Copilot ---
+# VS Code 1.99+ uses dedicated mcp.json; fall back to settings.json for older installs
+Register-McpTool -ToolName 'VS Code (mcp.json)' `
+    -ConfigPath "$env:APPDATA\Code\User\mcp.json" `
+    -Format 'vscode-mcp'
+
+Register-McpTool -ToolName 'VS Code Insiders (mcp.json)' `
+    -ConfigPath "$env:APPDATA\Code - Insiders\User\mcp.json" `
+    -Format 'vscode-mcp'
+
+# --- Cursor ---
+Register-McpTool -ToolName 'Cursor' `
+    -ConfigPath "$env:USERPROFILE\.cursor\mcp.json" `
+    -Format 'claude'
+
+# --- Windsurf (Codeium) ---
+Register-McpTool -ToolName 'Windsurf' `
+    -ConfigPath "$env:USERPROFILE\.codeium\windsurf\mcp_config.json" `
+    -Format 'claude'
+
+# --- Zed editor ---
+Register-McpTool -ToolName 'Zed' `
+    -ConfigPath "$env:APPDATA\Zed\settings.json" `
+    -Format 'zed'
+
+# --- Continue.dev (VS Code / JetBrains extension) ---
+Register-McpTool -ToolName 'Continue.dev' `
+    -ConfigPath "$env:USERPROFILE\.continue\config.json" `
+    -Format 'claude'
+
+# --- Antigravity ---
+Register-McpTool -ToolName 'Antigravity' `
+    -ConfigPath "$env:APPDATA\Antigravity\claude_desktop_config.json" `
+    -Format 'claude'
+
+# --- OpenAI ---
+Register-McpTool -ToolName 'OpenAI Codex CLI' `
+    -ConfigPath "$env:USERPROFILE\.codex\config.json" `
+    -Format 'claude'
+
+# --- Gemini CLI (Google) ---
+Register-McpTool -ToolName 'Gemini CLI' `
+    -ConfigPath "$env:USERPROFILE\.gemini\settings.json" `
+    -Format 'claude'
+
+# --- Amazon Q / AWS ---
+Register-McpTool -ToolName 'Amazon Q Developer' `
+    -ConfigPath "$env:USERPROFILE\.aws\amazonq\mcp.json" `
+    -Format 'claude'
+
+# --- JetBrains AI Assistant ---
+Register-McpTool -ToolName 'JetBrains AI Assistant' `
+    -ConfigPath "$env:APPDATA\JetBrains\AIAssistant\mcp.json" `
+    -Format 'claude'
+
+# --- Cline (VS Code extension) ---
+Register-McpTool -ToolName 'Cline (VS Code ext)' `
+    -ConfigPath "$env:APPDATA\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json" `
+    -Format 'claude'
+
+# --- Roo Code (VS Code extension) ---
+Register-McpTool -ToolName 'Roo Code (VS Code ext)' `
+    -ConfigPath "$env:APPDATA\Code\User\globalStorage\rooveterinaryinc.roo-cline\settings\cline_mcp_settings.json" `
+    -Format 'claude'
+
+Write-Host ""
+Write-Host "  NOTE: Restart any open AI tools for the MCP to take effect." -ForegroundColor Yellow
+
+# ============================================================
+# STEP 12 - Save credentials summary
 # ============================================================
 $ClaudeConfigPath = "$env:APPDATA\Claude\claude_desktop_config.json"
-$RepoDirEscaped   = $RepoDir.Replace("\","\\")
-$EntryPoint       = "$RepoDirEscaped\\openproject-mcp-fastmcp.py"
-
-$ClaudeConfigJson = @"
-{
-  "mcpServers": {
-    "openproject-$Username-local": {
-      "command": "uv",
-      "args": [
-        "run",
-        "python",
-        "$EntryPoint"
-      ],
-      "cwd": "$RepoDirEscaped"
-    }
-  }
-}
-"@
-
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Magenta
-Write-Host "  Claude Desktop MCP Config" -ForegroundColor Magenta
-Write-Host "============================================================" -ForegroundColor Magenta
-Write-Host ""
-Write-Host "  Add (or merge) the following into:" -ForegroundColor Yellow
-Write-Host "  $ClaudeConfigPath" -ForegroundColor White
-Write-Host ""
-Write-Host $ClaudeConfigJson -ForegroundColor Cyan
-
-# ============================================================
-# STEP 12 — Save credentials summary
-# ============================================================
-$CredFile = "$InstallDir\credentials.txt"
+$CredFile    = "$InstallDir\credentials.txt"
+$SetupDate   = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 $CredContent = @"
-OpenProject MCP — Local Setup Summary
+OpenProject MCP - Local Setup Summary
 ======================================
-Setup Date   : $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+Setup Date   : $SetupDate
 Windows User : $env:USERNAME
 Display Name : $Username
 Server URL   : $OpUrl
@@ -327,14 +528,13 @@ Write-Host "============================================================" -Foreg
 Write-Host "  SETUP COMPLETE!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Credentials summary saved to: $CredFile" -ForegroundColor White
+Write-Host "  Credentials saved to : $CredFile" -ForegroundColor White
+Write-Host "  MCP server location  : $RepoDir" -ForegroundColor White
 Write-Host ""
 Write-Host "  To start the MCP server:" -ForegroundColor Yellow
 Write-Host "    cd $RepoDir" -ForegroundColor White
 Write-Host "    uv run python openproject-mcp-fastmcp.py" -ForegroundColor White
 Write-Host ""
-Write-Host "  To share this setup script with teammates:" -ForegroundColor Yellow
-Write-Host "    1. Push setup-openproject-mcp.ps1 to your GitHub repo" -ForegroundColor White
-Write-Host "    2. Get the Raw URL and share this one-liner:" -ForegroundColor White
-Write-Host "       Set-ExecutionPolicy Bypass -Scope Process -Force; irm <RAW_URL> | iex" -ForegroundColor Cyan
+Write-Host "  Share this one-liner with teammates (after pushing to GitHub):" -ForegroundColor Yellow
+Write-Host "    Set-ExecutionPolicy Bypass -Scope Process -Force; irm <RAW_URL> | iex" -ForegroundColor Cyan
 Write-Host ""
